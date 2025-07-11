@@ -56,7 +56,7 @@ async fn main() {
     let result = SieveClient::connect(host, args.port, username, password).await;
 
     match result {
-        Ok(client) => {
+        Ok(mut client) => {
             println!("✓ Successfully connected to ManageSieve server!");
             println!("✓ Authentication successful!");
 
@@ -108,6 +108,22 @@ async fn main() {
             }
 
             println!("\n✓ Ready for script management operations!");
+
+            // Test list_scripts functionality
+            println!("\n📋 Listing scripts...");
+            match client.list_scripts().await {
+                Ok(scripts) => {
+                    if scripts.is_empty() {
+                        println!("No scripts found.");
+                    } else {
+                        println!("Scripts:");
+                        for (i, script) in scripts.iter().enumerate() {
+                            println!("  {}. {}", i + 1, script);
+                        }
+                    }
+                }
+                Err(e) => println!("❌ Error listing scripts: {}", e),
+            }
         }
         Err(e) => {
             eprintln!("❌ Connection failed: {}", e);

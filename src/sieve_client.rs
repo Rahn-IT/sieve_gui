@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
@@ -67,6 +67,20 @@ pub enum ConnectError {
     TlsError(#[from] rustls::Error),
     #[error("Authentication failed: {0}")]
     AuthenticationFailed(String),
+}
+
+#[derive(Debug, Error)]
+pub enum ManageSieveError {
+    #[error("IO error: {0}")]
+    IoError(#[from] io::Error),
+    #[error("Protocol error: {0}")]
+    ProtocolError(String),
+    #[error("Server error: {0}")]
+    ServerError(String),
+    #[error("Script not found: {0}")]
+    ScriptNotFound(String),
+    #[error("Invalid response: {0}")]
+    InvalidResponse(String),
 }
 
 impl SieveClient {
@@ -136,6 +150,179 @@ impl SieveClient {
         client.authenticate(username, password).await?;
 
         Ok(client)
+    }
+
+    pub async fn list_scripts(&mut self) -> Result<Vec<String>, ManageSieveError> {
+        // Send LISTSCRIPTS command
+        self.writer.write_all(b"LISTSCRIPTS\r\n").await?;
+        self.writer.flush().await?;
+
+        let mut scripts = Vec::new();
+        let mut response = String::new();
+
+        loop {
+            response.clear();
+            self.reader.read_line(&mut response).await?;
+            let line = response.trim();
+
+            if line.is_empty() {
+                continue;
+            }
+
+            let line_upper = line.to_uppercase();
+            if line_upper.starts_with("OK") {
+                break;
+            } else if line_upper.starts_with("NO") || line_upper.starts_with("BYE") {
+                return Err(ManageSieveError::ServerError(line.to_string()));
+            } else if line.starts_with("\"") {
+                // Parse quoted script name
+                if let Some(script_name) = self.parse_script_line(line) {
+                    scripts.push(script_name);
+                }
+            }
+        }
+
+        Ok(scripts)
+    }
+
+    pub async fn get_script(&mut self, script: &str) -> Result<String, ManageSieveError> {
+        // Send GETSCRIPT command
+        let command = format!("GETSCRIPT \"{}\"\r\n", script);
+        self.writer.write_all(command.as_bytes()).await?;
+        self.writer.flush().await?;
+
+        let mut response = String::new();
+        self.reader.read_line(&mut response).await?;
+        let line = response.trim();
+
+        if line.starts_with("{") {
+            // Parse literal string length
+            if let Some(length) = self.parse_literal_length(line) {
+                let mut script_content = vec![0u8; length];
+                self.reader.read_exact(&mut script_content).await?;
+
+                // Read the final response line
+                response.clear();
+                self.reader.read_line(&mut response).await?;
+                let final_line = response.trim().to_uppercase();
+
+                if final_line.starts_with("OK") {
+                    return Ok(String::from_utf8_lossy(&script_content).to_string());
+                } else {
+                    return Err(ManageSieveError::ServerError(final_line.to_string()));
+                }
+            }
+        }
+
+        let line_upper = line.to_uppercase();
+        if line_upper.starts_with("NO") {
+            Err(ManageSieveError::ScriptNotFound(script.to_string()))
+        } else if line_upper.starts_with("BYE") {
+            Err(ManageSieveError::ServerError(line.to_string()))
+        } else {
+            Err(ManageSieveError::InvalidResponse(line.to_string()))
+        }
+    }
+
+    pub async fn put_script(
+        &mut self,
+        script: &str,
+        content: &str,
+    ) -> Result<(), ManageSieveError> {
+        // Send PUTSCRIPT command with literal string
+        let command = format!("PUTSCRIPT \"{}\" {{{}}}\r\n", script, content.len());
+        self.writer.write_all(command.as_bytes()).await?;
+        self.writer.write_all(content.as_bytes()).await?;
+        self.writer.flush().await?;
+
+        let mut response = String::new();
+        self.reader.read_line(&mut response).await?;
+        let line = response.trim().to_uppercase();
+
+        if line.starts_with("OK") {
+            Ok(())
+        } else if line.starts_with("NO") {
+            Err(ManageSieveError::ServerError(response.trim().to_string()))
+        } else if line.starts_with("BYE") {
+            Err(ManageSieveError::ServerError(response.trim().to_string()))
+        } else {
+            Err(ManageSieveError::InvalidResponse(
+                response.trim().to_string(),
+            ))
+        }
+    }
+
+    pub async fn delete_script(&mut self, script: &str) -> Result<(), ManageSieveError> {
+        // Send DELETESCRIPT command
+        let command = format!("DELETESCRIPT \"{}\"\r\n", script);
+        self.writer.write_all(command.as_bytes()).await?;
+        self.writer.flush().await?;
+
+        let mut response = String::new();
+        self.reader.read_line(&mut response).await?;
+        let line = response.trim().to_uppercase();
+
+        if line.starts_with("OK") {
+            Ok(())
+        } else if line.starts_with("NO") {
+            Err(ManageSieveError::ScriptNotFound(script.to_string()))
+        } else if line.starts_with("BYE") {
+            Err(ManageSieveError::ServerError(response.trim().to_string()))
+        } else {
+            Err(ManageSieveError::InvalidResponse(
+                response.trim().to_string(),
+            ))
+        }
+    }
+
+    pub async fn rename_script(
+        &mut self,
+        old_name: &str,
+        new_name: &str,
+    ) -> Result<(), ManageSieveError> {
+        // Send RENAMESCRIPT command
+        let command = format!("RENAMESCRIPT \"{}\" \"{}\"\r\n", old_name, new_name);
+        self.writer.write_all(command.as_bytes()).await?;
+        self.writer.flush().await?;
+
+        let mut response = String::new();
+        self.reader.read_line(&mut response).await?;
+        let line = response.trim().to_uppercase();
+
+        if line.starts_with("OK") {
+            Ok(())
+        } else if line.starts_with("NO") {
+            Err(ManageSieveError::ScriptNotFound(old_name.to_string()))
+        } else if line.starts_with("BYE") {
+            Err(ManageSieveError::ServerError(response.trim().to_string()))
+        } else {
+            Err(ManageSieveError::InvalidResponse(
+                response.trim().to_string(),
+            ))
+        }
+    }
+
+    pub async fn set_active_script(&mut self, script: &str) -> Result<(), ManageSieveError> {
+        // Send SETACTIVE command
+        let command = format!("SETACTIVE \"{}\"\r\n", script);
+        self.writer.write_all(command.as_bytes()).await?;
+        self.writer.flush().await?;
+
+        let mut response = String::new();
+        self.reader.read_line(&mut response).await?;
+        let line = response.trim().to_uppercase();
+
+        if line.starts_with("OK") {
+            Ok(())
+        } else if line.starts_with("NO") {
+            Err(ManageSieveError::ScriptNotFound(script.to_string()))
+        } else if line.starts_with("BYE") {
+            Err(ManageSieveError::ServerError(response.trim().to_string()))
+        } else {
+            Err(ManageSieveError::InvalidResponse(
+                response.trim().to_string(),
+            ))
+        }
     }
 
     async fn ignore_initial_greeting(stream: &mut TcpStream) -> Result<(), ConnectError> {
@@ -270,6 +457,25 @@ impl SieveClient {
 
     pub fn writer(&mut self) -> &mut TlsWriter {
         &mut self.writer
+    }
+
+    // Helper method to parse script names from LISTSCRIPTS response
+    fn parse_script_line(&self, line: &str) -> Option<String> {
+        if let Ok((_, script_name)) = parse_quoted_string(line) {
+            Some(script_name.to_string())
+        } else {
+            None
+        }
+    }
+
+    // Helper method to parse literal string length from server response
+    fn parse_literal_length(&self, line: &str) -> Option<usize> {
+        if line.starts_with("{") && line.ends_with("}") {
+            let length_str = &line[1..line.len() - 1];
+            length_str.parse().ok()
+        } else {
+            None
+        }
     }
 
     async fn authenticate(
