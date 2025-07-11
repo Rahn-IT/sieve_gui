@@ -10,9 +10,13 @@ use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 use thiserror::Error;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsConnector, client::TlsStream};
+
+// Type aliases for cleaner code
+type TlsReader = tokio::io::ReadHalf<TlsStream<TcpStream>>;
+type TlsWriter = tokio::io::WriteHalf<TlsStream<TcpStream>>;
 
 #[derive(Debug, Clone)]
 pub struct Capabilities {
@@ -46,8 +50,8 @@ impl Default for Capabilities {
 }
 
 pub struct SieveClient {
-    reader: BufReader<tokio::io::ReadHalf<TlsStream<TcpStream>>>,
-    writer: tokio::io::WriteHalf<TlsStream<TcpStream>>,
+    reader: BufReader<TlsReader>,
+    writer: TlsWriter,
     capabilities: Capabilities,
     hostname: String,
 }
@@ -115,7 +119,7 @@ impl SieveClient {
         let mut tls_reader = BufReader::new(tls_read);
 
         // Read capabilities after TLS
-        let capabilities = Self::read_capabilities_tls(&mut tls_reader).await?;
+        let capabilities = Self::read_capabilities(&mut tls_reader).await?;
 
         // TODO: Implement authentication with username/password
         // For now, we'll return the client with the TLS connection established
@@ -146,8 +150,8 @@ impl SieveClient {
         Ok(())
     }
 
-    async fn read_capabilities_tls(
-        reader: &mut BufReader<tokio::io::ReadHalf<TlsStream<TcpStream>>>,
+    async fn read_capabilities(
+        reader: &mut BufReader<impl AsyncRead + Unpin>,
     ) -> Result<Capabilities, ConnectError> {
         let mut capabilities = Capabilities::default();
 
@@ -252,6 +256,14 @@ impl SieveClient {
 
     pub fn capabilities(&self) -> &Capabilities {
         &self.capabilities
+    }
+
+    pub fn reader(&mut self) -> &mut BufReader<TlsReader> {
+        &mut self.reader
+    }
+
+    pub fn writer(&mut self) -> &mut TlsWriter {
+        &mut self.writer
     }
 }
 
@@ -606,5 +618,17 @@ mod tests {
             // Test invalid hostnames
             assert!(hostname.is_empty() || hostname.trim().is_empty() || hostname.contains(".."));
         }
+    }
+
+    #[test]
+    fn test_type_aliases() {
+        // Test that the type aliases work correctly
+        use std::any::type_name;
+
+        // Verify the type aliases resolve to the expected types
+        assert!(type_name::<TlsReader>().contains("ReadHalf"));
+        assert!(type_name::<TlsWriter>().contains("WriteHalf"));
+        assert!(type_name::<TlsReader>().contains("TlsStream"));
+        assert!(type_name::<TlsWriter>().contains("TlsStream"));
     }
 }
