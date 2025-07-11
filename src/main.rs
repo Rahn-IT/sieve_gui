@@ -58,6 +58,7 @@ async fn main() {
     match result {
         Ok(client) => {
             println!("✓ Successfully connected to ManageSieve server!");
+            println!("✓ Authentication successful!");
 
             // Display parsed capabilities
             let caps = client.capabilities();
@@ -106,10 +107,11 @@ async fn main() {
                 }
             }
 
-            // TODO: Add sieve script management operations here
+            println!("\n✓ Ready for script management operations!");
         }
         Err(e) => {
-            eprintln!("Failed to connect: {}", e);
+            eprintln!("❌ Connection failed: {}", e);
+            std::process::exit(1);
         }
     }
 }

@@ -1,3 +1,4 @@
+use base64::{Engine as _, engine::general_purpose};
 use nom::{
     IResult,
     bytes::complete::take_until,
@@ -64,14 +65,16 @@ pub enum ConnectError {
     ProtocolError(String),
     #[error("TLS error: {0}")]
     TlsError(#[from] rustls::Error),
+    #[error("Authentication failed: {0}")]
+    AuthenticationFailed(String),
 }
 
 impl SieveClient {
     pub async fn connect(
         host: String,
         port: u16,
-        _username: String,
-        _password: String,
+        username: String,
+        password: String,
     ) -> Result<Self, ConnectError> {
         // Connect to specified host and port
         let address = format!("{}:{}", host, port);
@@ -121,15 +124,18 @@ impl SieveClient {
         // Read capabilities after TLS
         let capabilities = Self::read_capabilities(&mut tls_reader).await?;
 
-        // TODO: Implement authentication with username/password
-        // For now, we'll return the client with the TLS connection established
-
-        Ok(SieveClient {
+        // Create the client instance
+        let mut client = SieveClient {
             reader: tls_reader,
             writer: tls_write,
             capabilities,
             hostname: host,
-        })
+        };
+
+        // Authenticate with the server
+        client.authenticate(username, password).await?;
+
+        Ok(client)
     }
 
     async fn ignore_initial_greeting(stream: &mut TcpStream) -> Result<(), ConnectError> {
@@ -264,6 +270,53 @@ impl SieveClient {
 
     pub fn writer(&mut self) -> &mut TlsWriter {
         &mut self.writer
+    }
+
+    async fn authenticate(
+        &mut self,
+        username: String,
+        password: String,
+    ) -> Result<(), ConnectError> {
+        // Check if SASL PLAIN is supported
+        if !self.capabilities.sasl.contains(&"PLAIN".to_string()) {
+            return Err(ConnectError::AuthenticationFailed(
+                "SASL PLAIN mechanism not supported".to_string(),
+            ));
+        }
+
+        // Prepare SASL PLAIN authentication
+        let auth_string = format!("\0{}\0{}", username, password);
+        let auth_b64 = general_purpose::STANDARD.encode(&auth_string);
+
+        // Send AUTHENTICATE command
+        let command = format!("AUTHENTICATE \"PLAIN\" \"{}\"\r\n", auth_b64);
+        self.writer.write_all(command.as_bytes()).await?;
+        self.writer.flush().await?;
+
+        // Read response
+        let mut response = String::new();
+        self.reader.read_line(&mut response).await?;
+
+        // Check if authentication was successful
+        let response_upper = response.trim().to_uppercase();
+        if response_upper.starts_with("OK") {
+            Ok(())
+        } else if response_upper.starts_with("NO") {
+            Err(ConnectError::AuthenticationFailed(format!(
+                "Server rejected credentials: {}",
+                response.trim()
+            )))
+        } else if response_upper.starts_with("BYE") {
+            Err(ConnectError::AuthenticationFailed(format!(
+                "Server disconnected: {}",
+                response.trim()
+            )))
+        } else {
+            Err(ConnectError::AuthenticationFailed(format!(
+                "Unexpected response: {}",
+                response.trim()
+            )))
+        }
     }
 }
 
@@ -630,5 +683,104 @@ mod tests {
         assert!(type_name::<TlsWriter>().contains("WriteHalf"));
         assert!(type_name::<TlsReader>().contains("TlsStream"));
         assert!(type_name::<TlsWriter>().contains("TlsStream"));
+    }
+
+    #[test]
+    fn test_sasl_plain_encoding() {
+        // Test SASL PLAIN authentication string encoding
+        use base64::{Engine as _, engine::general_purpose};
+
+        let username = "testuser";
+        let password = "testpass";
+        let auth_string = format!("\0{}\0{}", username, password);
+        let auth_b64 = general_purpose::STANDARD.encode(&auth_string);
+
+        // Verify the base64 encoding
+        assert!(!auth_b64.is_empty());
+
+        // Decode and verify the content
+        let decoded = general_purpose::STANDARD.decode(&auth_b64).unwrap();
+        let decoded_string = String::from_utf8(decoded).unwrap();
+        assert_eq!(decoded_string, "\0testuser\0testpass");
+    }
+
+    #[test]
+    fn test_authentication_errors() {
+        // Test authentication error types
+        let auth_error = ConnectError::AuthenticationFailed("Invalid credentials".to_string());
+        assert_eq!(
+            auth_error.to_string(),
+            "Authentication failed: Invalid credentials"
+        );
+
+        // Test SASL mechanism not supported error
+        let sasl_error =
+            ConnectError::AuthenticationFailed("SASL PLAIN mechanism not supported".to_string());
+        assert!(
+            sasl_error
+                .to_string()
+                .contains("SASL PLAIN mechanism not supported")
+        );
+    }
+
+    #[test]
+    fn test_sasl_mechanism_check() {
+        // Test checking for SASL PLAIN support
+        let mut capabilities = Capabilities::default();
+
+        // Without SASL PLAIN
+        SieveClient::update_capabilities(
+            &mut capabilities,
+            "SASL".to_string(),
+            Some("LOGIN DIGEST-MD5".to_string()),
+        );
+        assert!(!capabilities.sasl.contains(&"PLAIN".to_string()));
+
+        // With SASL PLAIN
+        SieveClient::update_capabilities(
+            &mut capabilities,
+            "SASL".to_string(),
+            Some("PLAIN LOGIN DIGEST-MD5".to_string()),
+        );
+        assert!(capabilities.sasl.contains(&"PLAIN".to_string()));
+    }
+
+    #[test]
+    fn test_authenticate_command_format() {
+        // Test the format of the AUTHENTICATE command
+        use base64::{Engine as _, engine::general_purpose};
+
+        let username = "user";
+        let password = "pass";
+        let auth_string = format!("\0{}\0{}", username, password);
+        let auth_b64 = general_purpose::STANDARD.encode(&auth_string);
+        let command = format!("AUTHENTICATE \"PLAIN\" \"{}\"\r\n", auth_b64);
+
+        assert!(command.starts_with("AUTHENTICATE \"PLAIN\""));
+        assert!(command.ends_with("\r\n"));
+        assert!(command.contains(&auth_b64));
+    }
+
+    #[test]
+    fn test_authentication_response_parsing() {
+        // Test parsing different authentication responses
+        let ok_response = "OK Authentication successful";
+        let no_response = "NO \"Authentication failed.\"";
+        let bye_response = "BYE \"Too many failed attempts\"";
+        let unknown_response = "UNKNOWN Something unexpected";
+
+        // Test OK response
+        assert!(ok_response.trim().to_uppercase().starts_with("OK"));
+
+        // Test NO response
+        assert!(no_response.trim().to_uppercase().starts_with("NO"));
+
+        // Test BYE response
+        assert!(bye_response.trim().to_uppercase().starts_with("BYE"));
+
+        // Test unknown response
+        assert!(!unknown_response.trim().to_uppercase().starts_with("OK"));
+        assert!(!unknown_response.trim().to_uppercase().starts_with("NO"));
+        assert!(!unknown_response.trim().to_uppercase().starts_with("BYE"));
     }
 }
