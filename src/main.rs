@@ -1,42 +1,59 @@
 mod sieve_client;
 
 use clap::Parser;
+use dotenv::dotenv;
 use sieve_client::SieveClient;
+use std::env;
 
 #[derive(Parser)]
 #[command(name = "sieve-gui")]
 #[command(about = "A ManageSieve client for managing Sieve scripts")]
+#[command(
+    long_about = "A ManageSieve client for managing Sieve scripts.\n\nCredentials can be provided via command line arguments or environment variables.\nEnvironment variables can be loaded from a .env file."
+)]
 #[command(version)]
 struct Args {
-    /// ManageSieve server hostname
-    #[arg(long)]
-    host: String,
+    /// ManageSieve server hostname (or set SIEVE_HOST)
+    #[arg(long, env = "SIEVE_HOST")]
+    host: Option<String>,
 
-    /// Username for authentication
-    #[arg(short, long)]
-    username: String,
+    /// Username for authentication (or set SIEVE_USERNAME)
+    #[arg(short, long, env = "SIEVE_USERNAME")]
+    username: Option<String>,
 
-    /// Password for authentication
-    #[arg(short, long)]
-    password: String,
+    /// Password for authentication (or set SIEVE_PASSWORD)
+    #[arg(short, long, env = "SIEVE_PASSWORD")]
+    password: Option<String>,
 
-    /// Server port (default: 4190)
-    #[arg(long, default_value_t = 4190)]
+    /// Server port (default: 4190, or set SIEVE_PORT)
+    #[arg(long, default_value_t = 4190, env = "SIEVE_PORT")]
     port: u16,
 }
 
 #[tokio::main]
 async fn main() {
+    // Load .env file if it exists
+    let _ = dotenv();
+
     let args = Args::parse();
 
+    // Get required values from args or environment
+    let host = args
+        .host
+        .or_else(|| env::var("SIEVE_HOST").ok())
+        .expect("Host must be provided via --host argument or SIEVE_HOST environment variable");
+
+    let username = args.username.or_else(|| env::var("SIEVE_USERNAME").ok())
+        .expect("Username must be provided via --username argument or SIEVE_USERNAME environment variable");
+
+    let password = args.password.or_else(|| env::var("SIEVE_PASSWORD").ok())
+        .expect("Password must be provided via --password argument or SIEVE_PASSWORD environment variable");
+
     println!("ManageSieve Client");
-    println!(
-        "Connecting to {}:{} as {}",
-        args.host, args.port, args.username
-    );
+    println!("Connecting to {}:{} as {}", host, args.port, username);
 
     // Connect to the ManageSieve server
-    let result = SieveClient::connect(args.host, args.port, args.username, args.password).await;
+    let result = SieveClient::connect(host, args.port, username, password).await;
 
     match result {
         Ok(client) => {
