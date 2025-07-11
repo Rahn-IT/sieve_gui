@@ -1,10 +1,8 @@
 use nom::{
     IResult,
-    bytes::complete::{tag, take_until, take_while1},
-    character::complete::{char, digit1, space0, space1},
-    combinator::{map_res, opt},
-    multi::many0,
-    sequence::{delimited, preceded, tuple},
+    bytes::complete::take_until,
+    character::complete::{char, space0},
+    combinator::opt,
 };
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::ServerName;
@@ -47,37 +45,21 @@ impl Default for Capabilities {
     }
 }
 
-enum Connection {
-    Plain {
-        reader: BufReader<tokio::net::tcp::OwnedReadHalf>,
-        writer: tokio::net::tcp::OwnedWriteHalf,
-    },
-    Tls {
-        reader: BufReader<tokio::io::ReadHalf<TlsStream<TcpStream>>>,
-        writer: tokio::io::WriteHalf<TlsStream<TcpStream>>,
-    },
-}
-
 pub struct SieveClient {
-    connection: Connection,
+    reader: BufReader<tokio::io::ReadHalf<TlsStream<TcpStream>>>,
+    writer: tokio::io::WriteHalf<TlsStream<TcpStream>>,
     capabilities: Capabilities,
     hostname: String,
 }
 
 #[derive(Debug, Error)]
 pub enum ConnectError {
-    #[error("Wrong credentials")]
-    WrongCredentials,
     #[error("Connection failed: {0}")]
     ConnectionFailed(#[from] io::Error),
     #[error("Protocol error: {0}")]
     ProtocolError(String),
-    #[error("Parse error: {0}")]
-    ParseError(String),
     #[error("TLS error: {0}")]
     TlsError(#[from] rustls::Error),
-    #[error("TLS not supported by server")]
-    TlsNotSupported,
 }
 
 impl SieveClient {
@@ -93,23 +75,10 @@ impl SieveClient {
         // Establish TCP connection
         let mut stream = TcpStream::connect(&address).await?;
 
-        // Read and parse complete server greeting
-        let mut capabilities = Self::read_capabilities_stream(&mut stream).await?;
+        // Ignore initial capabilities greeting - just read until OK
+        Self::ignore_initial_greeting(&mut stream).await?;
 
-        // If no capabilities were sent automatically, request them explicitly
-        if capabilities.implementation.is_none()
-            && !capabilities.starttls
-            && capabilities.sasl.is_empty()
-        {
-            capabilities = Self::request_capabilities_stream(&mut stream).await?;
-        }
-
-        // Check if STARTTLS is supported
-        if !capabilities.starttls {
-            return Err(ConnectError::TlsNotSupported);
-        }
-
-        // Send STARTTLS command
+        // Send STARTTLS command immediately
         stream.write_all(b"STARTTLS\r\n").await?;
         stream.flush().await?;
 
@@ -152,27 +121,15 @@ impl SieveClient {
         // For now, we'll return the client with the TLS connection established
 
         Ok(SieveClient {
-            connection: Connection::Tls {
-                reader: tls_reader,
-                writer: tls_write,
-            },
+            reader: tls_reader,
+            writer: tls_write,
             capabilities,
             hostname: host,
         })
     }
 
-    async fn read_capabilities_stream(
-        stream: &mut TcpStream,
-    ) -> Result<Capabilities, ConnectError> {
+    async fn ignore_initial_greeting(stream: &mut TcpStream) -> Result<(), ConnectError> {
         let mut reader = BufReader::new(stream);
-        Self::read_capabilities_generic(&mut reader).await
-    }
-
-    async fn read_capabilities_generic<R: tokio::io::AsyncRead + Unpin>(
-        reader: &mut BufReader<R>,
-    ) -> Result<Capabilities, ConnectError> {
-        let mut capabilities = Capabilities::default();
-
         loop {
             let mut line = String::new();
             reader.read_line(&mut line).await?;
@@ -181,27 +138,12 @@ impl SieveClient {
                 continue;
             }
 
-            // Check for OK response (end of capabilities)
+            // Check for OK response (end of greeting)
             if line.trim().to_uppercase().starts_with("OK") {
-                // This could be either "OK" or "OK \"message\""
-                // If it's just OK, we're done. If it has a message, we're also done.
                 break;
             }
-
-            // Try to parse as capability line
-            match Self::parse_capability_line(&line) {
-                Ok((capability, value)) => {
-                    Self::update_capabilities(&mut capabilities, capability, value);
-                }
-                Err(_) => {
-                    // If we can't parse it as a capability, it might be a different format
-                    // Just ignore it and continue
-                    continue;
-                }
-            }
         }
-
-        Ok(capabilities)
+        Ok(())
     }
 
     async fn read_capabilities_tls(
@@ -306,17 +248,6 @@ impl SieveClient {
                 capabilities.other.insert(name, value.unwrap_or_default());
             }
         }
-    }
-
-    async fn request_capabilities_stream(
-        stream: &mut TcpStream,
-    ) -> Result<Capabilities, ConnectError> {
-        // Send CAPABILITY command
-        stream.write_all(b"CAPABILITY\r\n").await?;
-        stream.flush().await?;
-
-        // Read the response
-        Self::read_capabilities_stream(stream).await
     }
 
     pub fn capabilities(&self) -> &Capabilities {
@@ -505,34 +436,10 @@ mod tests {
 
     #[test]
     fn test_tls_error_handling() {
-        // Test that TlsNotSupported error is properly created
-        let error = ConnectError::TlsNotSupported;
-        assert_eq!(error.to_string(), "TLS not supported by server");
-    }
-
-    #[test]
-    fn test_tls_error_conversion() {
-        // Test that rustls errors are properly converted
+        // Test that TLS errors are properly created
         let rustls_error = rustls::Error::InvalidCertificate(rustls::CertificateError::BadEncoding);
         let connect_error = ConnectError::TlsError(rustls_error);
         assert!(connect_error.to_string().starts_with("TLS error:"));
-    }
-
-    #[test]
-    fn test_connection_enum() {
-        // Test that Connection enum variants can be created
-        use tokio::net::TcpStream;
-        use tokio_rustls::client::TlsStream;
-
-        // We can't actually create these without a real connection, but we can test the types exist
-        let _plain_type: Option<Connection> = None::<Connection>;
-
-        // Verify the enum has the expected variants
-        match _plain_type {
-            Some(Connection::Plain { .. }) => {}
-            Some(Connection::Tls { .. }) => {}
-            None => {}
-        }
     }
 
     #[test]
@@ -673,19 +580,14 @@ mod tests {
         // Test that capabilities are correctly updated after TLS
         let mut capabilities = Capabilities::default();
 
-        // Before TLS - STARTTLS should be present
-        SieveClient::update_capabilities(&mut capabilities, "STARTTLS".to_string(), None);
-        assert_eq!(capabilities.starttls, true);
-
         // After TLS - SASL mechanisms should be available
-        let mut post_tls_capabilities = Capabilities::default();
         SieveClient::update_capabilities(
-            &mut post_tls_capabilities,
+            &mut capabilities,
             "SASL".to_string(),
             Some("PLAIN LOGIN".to_string()),
         );
-        assert_eq!(post_tls_capabilities.sasl, vec!["PLAIN", "LOGIN"]);
-        assert_eq!(post_tls_capabilities.starttls, false); // Should not be present after TLS
+        assert_eq!(capabilities.sasl, vec!["PLAIN", "LOGIN"]);
+        assert_eq!(capabilities.starttls, false); // Should not be present after TLS
     }
 
     #[test]
@@ -704,31 +606,5 @@ mod tests {
             // Test invalid hostnames
             assert!(hostname.is_empty() || hostname.trim().is_empty() || hostname.contains(".."));
         }
-    }
-
-    #[test]
-    fn test_tls_requirement_enforcement() {
-        // Test that connection fails when TLS is not supported
-        let mut capabilities_without_tls = Capabilities::default();
-
-        // Set up capabilities without STARTTLS
-        SieveClient::update_capabilities(
-            &mut capabilities_without_tls,
-            "IMPLEMENTATION".to_string(),
-            Some("Test Server".to_string()),
-        );
-        SieveClient::update_capabilities(
-            &mut capabilities_without_tls,
-            "SIEVE".to_string(),
-            Some("fileinto".to_string()),
-        );
-
-        // Verify STARTTLS is not supported
-        assert_eq!(capabilities_without_tls.starttls, false);
-
-        // This simulates what would happen in the connect function
-        // when TLS is not supported - it should return TlsNotSupported error
-        let should_fail = !capabilities_without_tls.starttls;
-        assert!(should_fail, "Should fail when TLS is not supported");
     }
 }
