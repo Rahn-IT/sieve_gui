@@ -7,9 +7,9 @@ use nom::{
 };
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::ServerName;
-use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
+use std::{collections::HashMap, fmt::Debug};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
@@ -57,6 +57,12 @@ pub struct SieveClient {
     hostname: String,
 }
 
+impl Debug for SieveClient {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SieveClient")
+    }
+}
+
 #[derive(Debug, Error)]
 pub enum ConnectError {
     #[error("Connection failed: {0}")]
@@ -87,8 +93,8 @@ impl SieveClient {
     pub async fn connect(
         host: String,
         port: u16,
-        username: String,
-        password: String,
+        username: &str,
+        password: &str,
     ) -> Result<Self, ConnectError> {
         // Connect to specified host and port
         let address = format!("{}:{}", host, port);
@@ -478,11 +484,7 @@ impl SieveClient {
         }
     }
 
-    async fn authenticate(
-        &mut self,
-        username: String,
-        password: String,
-    ) -> Result<(), ConnectError> {
+    async fn authenticate(&mut self, username: &str, password: &str) -> Result<(), ConnectError> {
         // Check if SASL PLAIN is supported
         if !self.capabilities.sasl.contains(&"PLAIN".to_string()) {
             return Err(ConnectError::AuthenticationFailed(

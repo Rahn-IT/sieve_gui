@@ -1,0 +1,16 @@
+[package]
+name = "sieve_gui"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+sieve_client = { path = "../sieve_client" }
+iced = { git = "https://github.com/iced-rs/iced.git", features = [
+    "wgpu",
+    "tokio",
+    "sipper",
+    "svg",
+] }
+sqlx = { version = "0.8.6", features = ["runtime-tokio", "sqlite"] }
+directories-next = "2.0.0"
+tokio = { version = "1.46.1", features = ["full"] }
