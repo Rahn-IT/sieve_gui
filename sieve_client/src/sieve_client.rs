@@ -331,6 +331,81 @@ impl SieveClient {
         }
     }
 
+    pub async fn check_script(&mut self, script: &str) -> Result<Option<String>, ManageSieveError> {
+        // Send CHECKSCRIPT command with literal string
+        let command = format!("CHECKSCRIPT {{{}}}\r\n", script.len());
+        self.writer.write_all(command.as_bytes()).await?;
+        self.writer.write_all(script.as_bytes()).await?;
+        self.writer.flush().await?;
+
+        let mut response = String::new();
+        self.reader.read_line(&mut response).await?;
+        let line = response.trim();
+
+        if line.to_uppercase().starts_with("OK") {
+            // Check for WARNINGS response code in the OK response
+            if line.to_uppercase().contains("(WARNINGS)") {
+                // Extract warning message - it might be on the same line or a separate literal
+                let warning_msg = if let Some(start) = line.find('"') {
+                    // Warning message is quoted on the same line
+                    if let Some(end) = line.rfind('"') {
+                        if start != end {
+                            line[start + 1..end].to_string()
+                        } else {
+                            "Script has warnings".to_string()
+                        }
+                    } else {
+                        "Script has warnings".to_string()
+                    }
+                } else if line.contains("{") {
+                    // Warning message might be a literal string
+                    if let Some(length) = self.parse_literal_length(line) {
+                        let mut warning_content = vec![0u8; length];
+                        self.reader.read_exact(&mut warning_content).await?;
+                        String::from_utf8_lossy(&warning_content).to_string()
+                    } else {
+                        "Script has warnings".to_string()
+                    }
+                } else {
+                    "Script has warnings".to_string()
+                };
+                Ok(Some(warning_msg))
+            } else {
+                Ok(None)
+            }
+        } else if line.to_uppercase().starts_with("NO") {
+            // Extract error message from NO response
+            let error_msg = if let Some(start) = line.find('"') {
+                // Error message is quoted on the same line
+                if let Some(end) = line.rfind('"') {
+                    if start != end {
+                        line[start + 1..end].to_string()
+                    } else {
+                        line.to_string()
+                    }
+                } else {
+                    line.to_string()
+                }
+            } else if line.contains("{") {
+                // Error message might be a literal string
+                if let Some(length) = self.parse_literal_length(line) {
+                    let mut error_content = vec![0u8; length];
+                    self.reader.read_exact(&mut error_content).await?;
+                    String::from_utf8_lossy(&error_content).to_string()
+                } else {
+                    line.to_string()
+                }
+            } else {
+                line.to_string()
+            };
+            Err(ManageSieveError::ServerError(error_msg))
+        } else if line.to_uppercase().starts_with("BYE") {
+            Err(ManageSieveError::ServerError(line.to_string()))
+        } else {
+            Err(ManageSieveError::InvalidResponse(line.to_string()))
+        }
+    }
+
     async fn ignore_initial_greeting(stream: &mut TcpStream) -> Result<(), ConnectError> {
         let mut reader = BufReader::new(stream);
         loop {
