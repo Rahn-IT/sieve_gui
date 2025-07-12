@@ -209,6 +209,8 @@ impl UI {
                 if let Screen::Manage(manage) = &mut self.screen {
                     match manage.update(message) {
                         manage::Action::None => Task::none(),
+                        manage::Action::Back => self.to_account_select(),
+                        manage::Action::Run(task) => task.map(Message::Manage),
                     }
                 } else {
                     Task::none()
