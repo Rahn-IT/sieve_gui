@@ -7,12 +7,12 @@ use nom::{
 };
 use rustls::{ClientConfig, RootCertStore};
 use rustls_pki_types::ServerName;
-use std::io;
-use std::sync::Arc;
 use std::{collections::HashMap, fmt::Debug};
+use std::{io, sync::Arc};
 use thiserror::Error;
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::TcpStream;
+use tokio::sync::Mutex;
 use tokio_rustls::{TlsConnector, client::TlsStream};
 
 // Type aliases for cleaner code
@@ -51,8 +51,7 @@ impl Default for Capabilities {
 }
 
 pub struct SieveClient {
-    reader: BufReader<TlsReader>,
-    writer: TlsWriter,
+    connection: Mutex<(BufReader<TlsReader>, TlsWriter)>,
     capabilities: Capabilities,
     hostname: String,
 }
@@ -145,9 +144,8 @@ impl SieveClient {
         let capabilities = Self::read_capabilities(&mut tls_reader).await?;
 
         // Create the client instance
-        let mut client = SieveClient {
-            reader: tls_reader,
-            writer: tls_write,
+        let client = SieveClient {
+            connection: Mutex::new((tls_reader, tls_write)),
             capabilities,
             hostname: host,
         };
@@ -158,17 +156,20 @@ impl SieveClient {
         Ok(client)
     }
 
-    pub async fn list_scripts(&mut self) -> Result<Vec<String>, ManageSieveError> {
+    pub async fn list_scripts(&self) -> Result<Vec<(String, bool)>, ManageSieveError> {
+        let mut connection = self.connection.lock().await;
+        let (reader, writer) = &mut *connection;
+
         // Send LISTSCRIPTS command
-        self.writer.write_all(b"LISTSCRIPTS\r\n").await?;
-        self.writer.flush().await?;
+        writer.write_all(b"LISTSCRIPTS\r\n").await?;
+        writer.flush().await?;
 
         let mut scripts = Vec::new();
         let mut response = String::new();
 
         loop {
             response.clear();
-            self.reader.read_line(&mut response).await?;
+            reader.read_line(&mut response).await?;
             let line = response.trim();
 
             if line.is_empty() {
@@ -191,25 +192,28 @@ impl SieveClient {
         Ok(scripts)
     }
 
-    pub async fn get_script(&mut self, script: &str) -> Result<String, ManageSieveError> {
+    pub async fn get_script(&self, script: &str) -> Result<String, ManageSieveError> {
+        let mut connection = self.connection.lock().await;
+        let (reader, writer) = &mut *connection;
+
         // Send GETSCRIPT command
         let command = format!("GETSCRIPT \"{}\"\r\n", script);
-        self.writer.write_all(command.as_bytes()).await?;
-        self.writer.flush().await?;
+        writer.write_all(command.as_bytes()).await?;
+        writer.flush().await?;
 
         let mut response = String::new();
-        self.reader.read_line(&mut response).await?;
+        reader.read_line(&mut response).await?;
         let line = response.trim();
 
         if line.starts_with("{") {
             // Parse literal string length
             if let Some(length) = self.parse_literal_length(line) {
                 let mut script_content = vec![0u8; length];
-                self.reader.read_exact(&mut script_content).await?;
+                reader.read_exact(&mut script_content).await?;
 
                 // Read the final response line
                 response.clear();
-                self.reader.read_line(&mut response).await?;
+                reader.read_line(&mut response).await?;
                 let final_line = response.trim().to_uppercase();
 
                 if final_line.starts_with("OK") {
@@ -230,19 +234,18 @@ impl SieveClient {
         }
     }
 
-    pub async fn put_script(
-        &mut self,
-        script: &str,
-        content: &str,
-    ) -> Result<(), ManageSieveError> {
+    pub async fn put_script(&self, script: &str, content: &str) -> Result<(), ManageSieveError> {
+        let mut connection = self.connection.lock().await;
+        let (reader, writer) = &mut *connection;
+
         // Send PUTSCRIPT command with literal string
         let command = format!("PUTSCRIPT \"{}\" {{{}}}\r\n", script, content.len());
-        self.writer.write_all(command.as_bytes()).await?;
-        self.writer.write_all(content.as_bytes()).await?;
-        self.writer.flush().await?;
+        writer.write_all(command.as_bytes()).await?;
+        writer.write_all(content.as_bytes()).await?;
+        writer.flush().await?;
 
         let mut response = String::new();
-        self.reader.read_line(&mut response).await?;
+        reader.read_line(&mut response).await?;
         let line = response.trim().to_uppercase();
 
         if line.starts_with("OK") {
@@ -258,14 +261,17 @@ impl SieveClient {
         }
     }
 
-    pub async fn delete_script(&mut self, script: &str) -> Result<(), ManageSieveError> {
+    pub async fn delete_script(&self, script: &str) -> Result<(), ManageSieveError> {
+        let mut connection = self.connection.lock().await;
+        let (reader, writer) = &mut *connection;
+
         // Send DELETESCRIPT command
         let command = format!("DELETESCRIPT \"{}\"\r\n", script);
-        self.writer.write_all(command.as_bytes()).await?;
-        self.writer.flush().await?;
+        writer.write_all(command.as_bytes()).await?;
+        writer.flush().await?;
 
         let mut response = String::new();
-        self.reader.read_line(&mut response).await?;
+        reader.read_line(&mut response).await?;
         let line = response.trim().to_uppercase();
 
         if line.starts_with("OK") {
@@ -282,17 +288,20 @@ impl SieveClient {
     }
 
     pub async fn rename_script(
-        &mut self,
+        &self,
         old_name: &str,
         new_name: &str,
     ) -> Result<(), ManageSieveError> {
+        let mut connection = self.connection.lock().await;
+        let (reader, writer) = &mut *connection;
+
         // Send RENAMESCRIPT command
         let command = format!("RENAMESCRIPT \"{}\" \"{}\"\r\n", old_name, new_name);
-        self.writer.write_all(command.as_bytes()).await?;
-        self.writer.flush().await?;
+        writer.write_all(command.as_bytes()).await?;
+        writer.flush().await?;
 
         let mut response = String::new();
-        self.reader.read_line(&mut response).await?;
+        reader.read_line(&mut response).await?;
         let line = response.trim().to_uppercase();
 
         if line.starts_with("OK") {
@@ -308,14 +317,17 @@ impl SieveClient {
         }
     }
 
-    pub async fn set_active_script(&mut self, script: &str) -> Result<(), ManageSieveError> {
+    pub async fn set_active_script(&self, script: &str) -> Result<(), ManageSieveError> {
+        let mut connection = self.connection.lock().await;
+        let (reader, writer) = &mut *connection;
+
         // Send SETACTIVE command
         let command = format!("SETACTIVE \"{}\"\r\n", script);
-        self.writer.write_all(command.as_bytes()).await?;
-        self.writer.flush().await?;
+        writer.write_all(command.as_bytes()).await?;
+        writer.flush().await?;
 
         let mut response = String::new();
-        self.reader.read_line(&mut response).await?;
+        reader.read_line(&mut response).await?;
         let line = response.trim().to_uppercase();
 
         if line.starts_with("OK") {
@@ -331,15 +343,18 @@ impl SieveClient {
         }
     }
 
-    pub async fn check_script(&mut self, script: &str) -> Result<Option<String>, ManageSieveError> {
+    pub async fn check_script(&self, script: &str) -> Result<Option<String>, ManageSieveError> {
+        let mut connection = self.connection.lock().await;
+        let (reader, writer) = &mut *connection;
+
         // Send CHECKSCRIPT command with literal string
         let command = format!("CHECKSCRIPT {{{}}}\r\n", script.len());
-        self.writer.write_all(command.as_bytes()).await?;
-        self.writer.write_all(script.as_bytes()).await?;
-        self.writer.flush().await?;
+        writer.write_all(command.as_bytes()).await?;
+        writer.write_all(script.as_bytes()).await?;
+        writer.flush().await?;
 
         let mut response = String::new();
-        self.reader.read_line(&mut response).await?;
+        reader.read_line(&mut response).await?;
         let line = response.trim();
 
         if line.to_uppercase().starts_with("OK") {
@@ -361,7 +376,7 @@ impl SieveClient {
                     // Warning message might be a literal string
                     if let Some(length) = self.parse_literal_length(line) {
                         let mut warning_content = vec![0u8; length];
-                        self.reader.read_exact(&mut warning_content).await?;
+                        reader.read_exact(&mut warning_content).await?;
                         String::from_utf8_lossy(&warning_content).to_string()
                     } else {
                         "Script has warnings".to_string()
@@ -390,7 +405,7 @@ impl SieveClient {
                 // Error message might be a literal string
                 if let Some(length) = self.parse_literal_length(line) {
                     let mut error_content = vec![0u8; length];
-                    self.reader.read_exact(&mut error_content).await?;
+                    reader.read_exact(&mut error_content).await?;
                     String::from_utf8_lossy(&error_content).to_string()
                 } else {
                     line.to_string()
@@ -532,18 +547,14 @@ impl SieveClient {
         &self.capabilities
     }
 
-    pub fn reader(&mut self) -> &mut BufReader<TlsReader> {
-        &mut self.reader
-    }
-
-    pub fn writer(&mut self) -> &mut TlsWriter {
-        &mut self.writer
-    }
+    // Note: These methods are removed as they would break the Mutex encapsulation
+    // Access to reader/writer should be done through the async methods
 
     // Helper method to parse script names from LISTSCRIPTS response
-    fn parse_script_line(&self, line: &str) -> Option<String> {
+    fn parse_script_line(&self, line: &str) -> Option<(String, bool)> {
         if let Ok((_, script_name)) = parse_quoted_string(line) {
-            Some(script_name.to_string())
+            let is_active = line.to_uppercase().contains("ACTIVE");
+            Some((script_name.to_string(), is_active))
         } else {
             None
         }
@@ -559,7 +570,9 @@ impl SieveClient {
         }
     }
 
-    async fn authenticate(&mut self, username: &str, password: &str) -> Result<(), ConnectError> {
+    async fn authenticate(&self, username: &str, password: &str) -> Result<(), ConnectError> {
+        let mut connection = self.connection.lock().await;
+        let (reader, writer) = &mut *connection;
         // Check if SASL PLAIN is supported
         if !self.capabilities.sasl.contains(&"PLAIN".to_string()) {
             return Err(ConnectError::AuthenticationFailed(
@@ -572,13 +585,13 @@ impl SieveClient {
         let auth_b64 = general_purpose::STANDARD.encode(&auth_string);
 
         // Send AUTHENTICATE command
-        let command = format!("AUTHENTICATE \"PLAIN\" \"{}\"\r\n", auth_b64);
-        self.writer.write_all(command.as_bytes()).await?;
-        self.writer.flush().await?;
+        let auth_command = format!("AUTHENTICATE \"PLAIN\" \"{}\"\r\n", auth_b64);
+        writer.write_all(auth_command.as_bytes()).await?;
+        writer.flush().await?;
 
         // Read response
         let mut response = String::new();
-        self.reader.read_line(&mut response).await?;
+        reader.read_line(&mut response).await?;
 
         // Check if authentication was successful
         let response_upper = response.trim().to_uppercase();
