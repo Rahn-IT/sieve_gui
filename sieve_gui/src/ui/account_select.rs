@@ -22,7 +22,7 @@ pub enum Message {
 
 pub enum Action {
     None,
-    Selected(SieveClient),
+    Selected(Arc<SieveClient>),
     AddAccount,
     Run(Task<Message>),
 }
@@ -98,13 +98,7 @@ impl AccountSelect {
                 Action::None
             }
             Message::Select(id) => Action::Run(self.open_account(id)),
-            Message::Opened(client) => {
-                if let Some(client) = Arc::into_inner(client) {
-                    Action::Selected(client)
-                } else {
-                    Action::None
-                }
-            }
+            Message::Opened(client) => Action::Selected(client),
             Message::AddAccount => Action::AddAccount,
         }
     }

@@ -21,7 +21,7 @@ pub enum Message {
 pub enum Action {
     None,
     Run(Task<Message>),
-    Added(SieveClient),
+    Added(Arc<SieveClient>),
     Back,
 }
 
@@ -80,13 +80,7 @@ impl AddAccount {
 
                 Action::None
             }
-            Message::AccountAdded(client) => {
-                if let Some(client) = Arc::into_inner(client) {
-                    Action::Added(client)
-                } else {
-                    Action::None
-                }
-            }
+            Message::AccountAdded(client) => Action::Added(client),
             Message::Back => match &self.state {
                 State::Input => Action::Back,
                 State::Connecting => Action::None,

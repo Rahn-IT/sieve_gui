@@ -223,7 +223,7 @@ impl UI {
         task.map(Message::AccountSelect)
     }
 
-    fn to_manage(&mut self, client: SieveClient) -> Task<Message> {
+    fn to_manage(&mut self, client: Arc<SieveClient>) -> Task<Message> {
         let (manage, task) = Manage::new(client);
         self.screen = Screen::Manage(manage);
         task.map(Message::Manage)
