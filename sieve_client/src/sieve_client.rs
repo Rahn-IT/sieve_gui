@@ -205,13 +205,19 @@ impl SieveClient {
         reader.read_line(&mut response).await?;
         let line = response.trim();
 
+        // Check if we got a literal string response
         if line.starts_with("{") {
             // Parse literal string length
             if let Some(length) = self.parse_literal_length(line) {
+                // Read the exact number of bytes for the script content
                 let mut script_content = vec![0u8; length];
                 reader.read_exact(&mut script_content).await?;
 
-                // Read the final response line
+                // Read the CRLF that follows the literal content
+                let mut crlf = [0u8; 2];
+                reader.read_exact(&mut crlf).await?;
+
+                // Read the final OK response line
                 response.clear();
                 reader.read_line(&mut response).await?;
                 let final_line = response.trim().to_uppercase();
@@ -221,9 +227,14 @@ impl SieveClient {
                 } else {
                     return Err(ManageSieveError::ServerError(final_line.to_string()));
                 }
+            } else {
+                return Err(ManageSieveError::ProtocolError(
+                    "Invalid literal length format".to_string(),
+                ));
             }
         }
 
+        // Handle non-literal responses (errors)
         let line_upper = line.to_uppercase();
         if line_upper.starts_with("NO") {
             Err(ManageSieveError::ScriptNotFound(script.to_string()))
