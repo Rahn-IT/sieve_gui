@@ -1,9 +1,8 @@
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 
 use iced::{
-    Alignment::Center,
     Element, Length, Task,
-    widget::{Button, button, center, column, horizontal_space, row, scrollable, text},
+    widget::{button, center, column, horizontal_space, row, scrollable, text},
 };
 use sieve_client::SieveClient;
 use sqlx::SqlitePool;

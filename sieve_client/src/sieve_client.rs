@@ -53,7 +53,6 @@ impl Default for Capabilities {
 pub struct SieveClient {
     connection: Mutex<(BufReader<TlsReader>, TlsWriter)>,
     capabilities: Capabilities,
-    hostname: String,
 }
 
 impl Debug for SieveClient {
@@ -147,7 +146,6 @@ impl SieveClient {
         let client = SieveClient {
             connection: Mutex::new((tls_reader, tls_write)),
             capabilities,
-            hostname: host,
         };
 
         // Authenticate with the server

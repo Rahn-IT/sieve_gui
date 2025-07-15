@@ -1,21 +1,26 @@
 {
   "db_name": "SQLite",
-  "query": "SELECT server, username, password FROM accounts",
+  "query": "SELECT id, server, username, password FROM accounts",
   "describe": {
     "columns": [
       {
-        "name": "server",
+        "name": "id",
         "ordinal": 0,
-        "type_info": "Text"
+        "type_info": "Integer"
       },
       {
-        "name": "username",
+        "name": "server",
         "ordinal": 1,
         "type_info": "Text"
       },
       {
-        "name": "password",
+        "name": "username",
         "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "password",
+        "ordinal": 3,
         "type_info": "Text"
       }
     ],
@@ -25,8 +30,9 @@
     "nullable": [
       false,
       false,
+      false,
       false
     ]
   },
-  "hash": "3e317ae953379e421d8b677bdd32306783d6934175725395aaa5ccd8c3b97ccf"
+  "hash": "7b7ed409ab0b2f2d4d19f62fae099d60079d3a5594c9ec620a99830085e39f66"
 }
