@@ -6,73 +6,13 @@ use nom::{
     bytes::complete::{is_not, tag, take_while},
     character::streaming::char,
     combinator::{map, opt, value, verify},
-    multi::{fold_many0, many0, separated_list0},
+    multi::{fold_many0, many0, separated_list0, separated_list1},
     sequence::{delimited, pair, preceded, tuple},
 };
 
-fn parse_escaped_char(input: &str) -> IResult<&str, char> {
-    preceded(
-        char('\\'),
-        alt((value('\\', char('\\')), value('"', char('"')))),
-    )
-    .parse(input)
-}
+mod util;
 
-fn parse_unescaped_sequence(input: &str) -> IResult<&str, &str> {
-    let not_quoted = is_not("\\\"");
-
-    verify(not_quoted, |s: &str| !s.is_empty()).parse(input)
-}
-
-enum StringPart<'a> {
-    Literal(&'a str),
-    Escaped(char),
-}
-
-fn parse_string_part(input: &str) -> IResult<&str, StringPart> {
-    alt((
-        map(parse_unescaped_sequence, StringPart::Literal),
-        map(parse_escaped_char, StringPart::Escaped),
-    ))
-    .parse(input)
-}
-
-fn parse_string(input: &str) -> IResult<&str, String> {
-    let build_string = fold_many0(parse_string_part, String::new, |mut string, fragment| {
-        match fragment {
-            StringPart::Literal(literal) => string.push_str(literal),
-            StringPart::Escaped(char) => string.push(char),
-        };
-
-        string
-    });
-
-    delimited(char('"'), build_string, char('"')).parse(input)
-}
-
-fn multispace0(input: &str) -> IResult<&str, &str> {
-    take_while(|c| match c {
-        ' ' => true,
-        '\t' => true,
-        '\n' => true,
-        '\r' => true,
-        _ => false,
-    })
-    .parse(input)
-}
-
-fn multispace1(input: &str) -> IResult<&str, &str> {
-    verify(multispace0, |s: &str| !s.is_empty()).parse(input)
-}
-
-fn parse_string_array(input: &str) -> IResult<&str, Vec<String>> {
-    delimited(
-        pair(char('['), multispace0),
-        separated_list0(tuple((multispace0, char(','), multispace0)), parse_string),
-        pair(multispace0, char(']')),
-    )
-    .parse(input)
-}
+use util::{multispace0, multispace1, parse_string, parse_string_array};
 
 fn parse_require(input: &str) -> IResult<&str, Vec<String>> {
     delimited(
@@ -126,10 +66,24 @@ fn parse_string_condition(input: &str) -> IResult<&str, StringCondition> {
     ))
 }
 
+fn parse_condition_list(input: &str) -> IResult<&str, Vec<Condition>> {
+    delimited(
+        preceded(char('('), multispace0),
+        separated_list1(
+            delimited(multispace0, char(','), multispace0),
+            parse_condition,
+        ),
+        preceded(multispace0, char(')')),
+    )
+    .parse(input)
+}
+
 #[derive(Debug, PartialEq)]
 enum Condition {
     Header(StringCondition),
     Address(StringCondition),
+    AllOf(Vec<Condition>),
+    AnyOf(Vec<Condition>),
 }
 
 fn parse_condition(input: &str) -> IResult<&str, Condition> {
@@ -141,6 +95,8 @@ fn parse_condition(input: &str) -> IResult<&str, Condition> {
             preceded(multispace1, parse_string_condition),
         )
         .map(Condition::Address),
+        preceded(tag("allof"), preceded(multispace0, parse_condition_list)).map(Condition::AllOf),
+        preceded(tag("anyof"), preceded(multispace0, parse_condition_list)).map(Condition::AnyOf),
     ))
     .parse(input)
 }
@@ -246,6 +202,7 @@ enum Expression {
     SetFlag(Vec<Flag>),
     Discard,
     Keep,
+    Stop,
 }
 
 fn parse_expression(input: &str) -> IResult<&str, Expression> {
@@ -259,6 +216,7 @@ fn parse_expression(input: &str) -> IResult<&str, Expression> {
             flag_command("setflag").map(Expression::SetFlag),
             tag("discard;").map(|_| Expression::Discard),
             tag("keep;").map(|_| Expression::Keep),
+            tag("stop;").map(|_| Expression::Stop),
             delimited(
                 tag("fileinto"),
                 preceded(multispace1, parse_string),
@@ -576,5 +534,287 @@ mod test {
                     })
                 ]
         );
+
+        assert_eq!(
+            parse_expression_list(
+                r#"
+            require ["imap4flags","fileinto"];
+
+            if allof (header :contains "subject" "backup successful") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Proxmox Backup";
+
+            }
+
+            if allof (address :contains "from" "ServiceQueue-noreply@teamviewer.com") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Teamviewer";
+
+            }"#,
+            ),
+            Ok((
+                "",
+                vec![
+                    Expression::Require(vec!["imap4flags".to_string(), "fileinto".to_string()]),
+                    Expression::If(If {
+                        condition: Condition::AllOf(vec![Condition::Header(StringCondition {
+                            comparison_type: StringComparisonType::Contains,
+                            source: "subject".to_string(),
+                            value: "backup successful".to_string()
+                        })]),
+                        expressions: vec![
+                            Expression::AddFlag(vec![Flag::Seen]),
+                            Expression::FileInto("INBOX/Proxmox Backup".to_string())
+                        ],
+                        else_ifs: vec![],
+                        else_block: vec![]
+                    }),
+                    Expression::If(If {
+                        condition: Condition::AllOf(vec![Condition::Address(StringCondition {
+                            comparison_type: StringComparisonType::Contains,
+                            source: "from".to_string(),
+                            value: "ServiceQueue-noreply@teamviewer.com".to_string()
+                        })]),
+                        expressions: vec![
+                            Expression::AddFlag(vec![Flag::Seen]),
+                            Expression::FileInto("INBOX/Teamviewer".to_string())
+                        ],
+                        else_ifs: vec![],
+                        else_block: vec![]
+                    })
+                ]
+            ))
+        );
+
+        assert_eq!(parse_expression_list(r#"
+            require ["imap4flags","fileinto","body"];
+
+            if allof (header :contains "subject" "ALTERNATE - Rechnung") {
+
+                addflag "\\Seen";
+
+                addflag "berechnen";
+
+                fileinto "INBOX/Belege/Alternate";
+
+            }
+
+            if allof (address :contains "from" "info@elovade.com") {
+
+                addflag "\\Seen";
+
+                addflag "berechnen";
+
+                fileinto "INBOX/Belege/Elovade";
+
+            }
+
+            if allof (header :contains "subject" "FinHelper Rechnung") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Belege/Finhelper";
+
+            }
+
+            if allof (header :contains "subject" "Ihre IONOS Rechnung") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Belege/Ionos";
+
+            }
+
+            if allof (header :contains "subject" "Jakobsoftware - Ihre Rechnung") {
+
+                addflag "\\Seen";
+
+                addflag "berechnen";
+
+            }
+
+            if allof (header :contains "subject" "Rechnungskopie", address :contains "from" "info@servercow.de") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Belege/Mailcow - Servercow";
+
+                addflag "berechnen";
+
+            }
+
+            if allof (address :contains "from" "shop@office-partner.de", header :contains "subject" "Bestellinformation und Rechnung") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Belege/OfficePartner";
+
+                addflag "berechnen";
+
+            }
+
+            if allof (address :contains "from" "team@sipgate.de", header :contains "subject" "Rechnung") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Belege/Sipgrate";
+
+            }
+
+            if allof (address :contains "from" "no-reply-member@afterbuy.de") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Belege/Softwarebilliger";
+
+            }
+
+            if allof (header :contains "subject" "Ihre STRATO-Rechnung") {
+
+                addflag "\\Seen";
+
+            }
+
+            if allof (address :contains "from" "rechnungonline@telekom.de") {
+
+                fileinto "INBOX/Belege/Telekom";
+
+                addflag "\\Seen";
+
+            }
+
+            if allof (header :contains "subject" "backup successful") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Meldungen/Proxmox Backup";
+
+            }
+
+            if allof (address :contains "from" "pbs@it-rahn.de", header :contains "subject" "successful") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Meldungen/PBS";
+
+                stop;
+
+            }
+
+            if anyof (header :contains "subject" "Sync remote 'rahnit-pbs' datastore 'rahnit' successful", header :contains "subject" "Verify Datastore 'rahnit' successful") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Meldungen/PBS2";
+
+            }
+
+            if anyof (header :contains "subject" "Tagesbackup Erfolgreich", header :contains "subject" "Tagessicherung Neu Erfolgreich", header :contains "subject" "Tagessicherung intern Erfolgreich", header :contains "subject" "Tagesbackup neu Erfolgreich", header :contains "subject" "Cloud-Sicherung Erfolgreich", header :contains "subject" "Wochensicherung Cloud : Erfolgreich", header :contains "subject" "Wiederherstellungstest Erfolgreich", header :contains "subject" "Wochensicherung Neu Erfolgreich", header :contains "subject" "Wochensicherung neue Version Erfolgreich", header :contains "subject" "Wochensicherung 2 Erfolgreich", header :contains "subject" "Tagessicherung : Erfolgreich", header :contains "subject" "Wochensicherung : Erfolgreich", header :contains "subject" "Sicherung Intern H Montag Dienstag Freitag Erfolgreich", header :contains "subject" "Sicherung Intern F Dienstag Donnerstag Erfolgreich") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Meldungen/Backupassist";
+
+            }
+
+            if allof (header :contains "subject" "Ihre Downloadinformation von softwarebilliger.de") {
+
+                addflag "berechnen";
+
+                fileinto "INBOX/Lizenzen";
+
+            }
+
+            if allof (address :contains "from" "noreply@3cx.net") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Meldungen/3CX";
+
+            }
+
+            if anyof (header :contains "subject" "ALTERNATE – Bestellung erhalten", header :contains "subject" "ALTERNATE – Bestellung im System eingegangen") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Werbung/Alternate";
+
+            }
+
+            if allof (header :contains "subject" "Keine Verbindung zum Gerät für 14+ Tage") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Meldungen/Avast";
+
+            }
+
+            if allof (header :contains "subject" "Ihre Bestellung", header :contains "subject" "bei OFFICE Partner") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Werbung/OfficePartner";
+
+            }
+
+            if anyof (header :contains "subject" "Proxmox Status Report", header :contains "subject" "Backup successful to pbs") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Meldungen/PMG";
+
+            }
+
+            if anyof (address :contains "from" "no-reply@notifications.ui.com", address :contains "from" "Unifi OS", header :contains "subject" "Threat Detected", header :contains "From" "no-reply@notifications.ui.com") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Meldungen/Unifi";
+
+            }
+
+            if allof (address :contains "from" "sales@allnet.de") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Werbung/Allnet";
+
+            }
+
+            if allof (address :contains "from" "mailings@mailings.gmx.net") {
+
+                addflag "\\Seen";
+
+                fileinto "Trash";
+
+            }
+
+            if anyof (header :contains "subject" "Neue Aufträge in Ihrem Tätigkeitsbereich") {
+
+                addflag "\\Seen";
+
+                fileinto "Trash";
+
+            }
+
+            if allof (header :contains "subject" "Ihre Konkurrenten schalten Google Ads") {
+
+                addflag "\\Seen";
+
+                fileinto "Trash";
+
+            }
+
+            if allof (header :contains "subject" "Ihre Bestellung im Softwarebilliger.de") {
+
+                addflag "\\Seen";
+
+                fileinto "INBOX/Werbung/Softwarebilliger";
+
+            }"#).unwrap().0.len(), 0);
     }
 }
